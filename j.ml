@@ -37,11 +37,14 @@ let newvar_t () = TVar (newvar ())
  * Working with a simple language with unit, variables,
  * type annotations, lambdas, and function application
  *)
+open Expr
+(* in expr.mli:
 type expr = Unit
           | Identifier of string
           | Lambda of string * expr
           | FnCall of expr * expr
           | Let of string * expr * expr
+*)
 
 
 (*
@@ -63,7 +66,7 @@ exception TypeError
 
 (* specializes the polytype s by copying the term and replacing the
  * bound type variables consistently by new monotype variables *)
-let inst s =
+let inst (s: typ) : typ =
     (* Replace any typevars found in the Hashtbl with the
      * associated value in the same table, leave them otherwise *)
     let rec replace_tvs tbl = function
@@ -89,11 +92,16 @@ let inst s =
     | other -> other
 
 
-let rec unify t1 t2 = ()
+let rec unify (t1: typ) (t2: typ) : unit = match (t1, t2) with
+    | (TUnit, TUnit) -> ()
+    | (TVar(a), TVar(b)) -> ()
+    | (Fn(a, b), Fn(c, d)) -> ()
+    | (PolyType(a, t), PolyType(b, u)) -> unify t u
+    | (a, b) -> raise TypeError
 
 (* copy the type introducing new variables for the quantification
  * to avoid unwanted captures *)
-let copy_with_new_typevars t =
+let copy_with_new_typevars (t: typ) : typ =
     let rec copy_wnt' map = function
         | TUnit -> TUnit
         | TVar(n) ->
@@ -125,7 +133,7 @@ let copy_with_new_typevars t =
 (* All branches (except for the trivial Unit) of the first match in this function
    are translated directly from the rules for algorithm J, given in comments *)
 (* infer : Env -> Expr -> Type *)
-let rec infer env = function
+let rec infer env : expr -> typ = function
     | Unit -> TUnit
 
     (* Var
@@ -175,3 +183,46 @@ let rec infer env = function
         let t = infer env e0 in
         let t' = infer (SMap.add x (copy_with_new_typevars t) env) e1 in
         t'
+
+
+(******************************************************************************
+                       front-end for parsing exprs on
+                        the command line and showing
+                             their computed types
+******************************************************************************)
+
+(* pretty printing types *)
+let rec string_of_type : typ -> string = function
+    | TUnit -> "unit"
+    | TVar(n) -> "'" ^ string_of_int n
+    | Fn(a, b) ->
+        begin match a with
+        | Fn(_, _) | PolyType(_, _) ->
+                "(" ^ string_of_type a ^ ") -> " ^ string_of_type b
+        | _ -> string_of_type a ^ " -> " ^ string_of_type b
+        end
+    | PolyType(tvs, t) ->
+        let tvs_str = match tvs with
+            | [] -> ""
+            | first::rest ->
+                List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv)
+                               ("'" ^ string_of_int first)
+                               rest
+        in "forall " ^ tvs_str ^ ". "
+
+let print_type (t: typ) : unit =
+    print_string (string_of_type t)
+
+    
+(* The classic read-eval-printline-loop *)
+let rec main () =
+    print_string "> ";
+    read_line ()
+    |> Lexer.parse
+    |> infer SMap.empty
+    |> print_type;
+    print_string "\n";
+    curTV := 0;
+    main ()
+
+let () = main ()
