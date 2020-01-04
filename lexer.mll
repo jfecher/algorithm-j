@@ -48,7 +48,7 @@ rule read =
         | Parser.Error ->
             print_position lexbuf;
             print_endline ": syntax error";
-            exit (-1)
+            None
 
     let rec parse str =
         let lexbuf = Lexing.from_string str in

@@ -46,6 +46,28 @@ type expr = Unit
           | Let of string * expr * expr
 *)
 
+(* pretty printing types *)
+let rec string_of_type : typ -> string = function
+    | TUnit -> "unit"
+    | TVar(n) -> "'" ^ string_of_int n
+    | Fn(a, b) ->
+        begin match a with
+        | Fn(_, _) | PolyType(_, _) ->
+                "(" ^ string_of_type a ^ ") -> " ^ string_of_type b
+        | _ -> string_of_type a ^ " -> " ^ string_of_type b
+        end
+    | PolyType(tvs, t) ->
+        let tvs_str = match tvs with
+            | [] -> ""
+            | first::rest ->
+                List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv)
+                               ("'" ^ string_of_int first)
+                               rest
+        in "forall " ^ tvs_str ^ ". "
+
+let print_type (t: typ) : unit =
+    print_string (string_of_type t)
+
 
 (*
  * The type environment contains our current assumptions
@@ -92,12 +114,24 @@ let inst (s: typ) : typ =
     | other -> other
 
 
-let rec unify (t1: typ) (t2: typ) : unit = match (t1, t2) with
-    | (TUnit, TUnit) -> ()
-    | (TVar(a), TVar(b)) -> ()
-    | (Fn(a, b), Fn(c, d)) -> ()
-    | (PolyType(a, t), PolyType(b, u)) -> unify t u
+(* TODO: implement proper unify via union-find *)
+let rec unify (t1: typ) (t2: typ) = match (t1, t2) with
+    | (TUnit, TUnit) -> TUnit
+
+    | (TVar(a), b) -> b
+    | (a, TVar(b)) -> a
+
+    | (Fn(a, b), Fn(c, d)) ->
+        let a' = unify a c in
+        let b' = unify b d in
+        Fn(a', b')
+
+    | (PolyType(a, t), PolyType(b, u)) ->
+        (* TODO: unimplemented! *)
+        unify t u
+
     | (a, b) -> raise TypeError
+
 
 (* copy the type introducing new variables for the quantification
  * to avoid unwanted captures *)
@@ -159,8 +193,12 @@ let rec infer env : expr -> typ = function
         let t0 = infer env f in
         let t1 = infer env x in
         let t' = newvar_t () in
-        unify t0 (Fn(t1, t'));
-        t'
+        let t0' = unify t0 (Fn(t1, t')) in
+        (* t' *)
+        begin match t0' with
+        | Fn(_, unified_t') -> unified_t'
+        | _ -> raise TypeError (* unreachable *)
+        end
 
     (* Abs
      *   t = newvar ()
@@ -191,37 +229,19 @@ let rec infer env : expr -> typ = function
                              their computed types
 ******************************************************************************)
 
-(* pretty printing types *)
-let rec string_of_type : typ -> string = function
-    | TUnit -> "unit"
-    | TVar(n) -> "'" ^ string_of_int n
-    | Fn(a, b) ->
-        begin match a with
-        | Fn(_, _) | PolyType(_, _) ->
-                "(" ^ string_of_type a ^ ") -> " ^ string_of_type b
-        | _ -> string_of_type a ^ " -> " ^ string_of_type b
-        end
-    | PolyType(tvs, t) ->
-        let tvs_str = match tvs with
-            | [] -> ""
-            | first::rest ->
-                List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv)
-                               ("'" ^ string_of_int first)
-                               rest
-        in "forall " ^ tvs_str ^ ". "
-
-let print_type (t: typ) : unit =
-    print_string (string_of_type t)
-
     
 (* The classic read-eval-printline-loop *)
 let rec main () =
-    print_string "> ";
-    read_line ()
-    |> Lexer.parse
-    |> infer SMap.empty
-    |> print_type;
-    print_string "\n";
+    (try
+        print_string "> ";
+        read_line ()
+        |> Lexer.parse
+        |> infer SMap.empty
+        |> print_type;
+        print_string "\n"
+    with
+       | TypeError -> print_endline "type error"
+       | Failure(s) -> print_endline "lexing failure, invalid symbol");
     curTV := 0;
     main ()
 
