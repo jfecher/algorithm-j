@@ -87,7 +87,8 @@ type tenv = typ SMap.t
 exception TypeError
 
 (* specializes the polytype s by copying the term and replacing the
- * bound type variables consistently by new monotype variables *)
+ * bound type variables consistently by new monotype variables
+ * E.g.   inst (forall a b. a -> b -> a) = c -> d -> c     *)
 let inst (s: typ) : typ =
     (* Replace any typevars found in the Hashtbl with the
      * associated value in the same table, leave them otherwise *)
@@ -114,23 +115,61 @@ let inst (s: typ) : typ =
     | other -> other
 
 
-(* TODO: implement proper unify via union-find *)
-let rec unify (t1: typ) (t2: typ) = match (t1, t2) with
-    | (TUnit, TUnit) -> TUnit
+(* The find for our union-find like algorithm *)
+(* Go through the given type, replacing all typevars with their bound types when possible *)
 
-    | (TVar(a), b) -> b
-    | (a, TVar(b)) -> a
+(* This is the main part where this reference impl diverges
+ * from the word-for-word algorithm but the union-find algorithm
+ * also isn't the core of algorithm-j anyway and this works as well *)
+let rec find tbl = function
+    | TUnit -> TUnit
+    | TVar(a) ->
+        begin match ITbl.find_opt tbl a with
+        | Some t' -> find tbl t'
+        | None -> TVar(a)
+        end
+    | Fn(a, b) -> Fn(find tbl a, find tbl b)
+    | PolyType(tvs, t) ->
+        let tbl_cpy = ITbl.copy tbl in
+        List.iter (ITbl.remove tbl_cpy) tvs;
+        PolyType(tvs, find tbl_cpy t)
 
-    | (Fn(a, b), Fn(c, d)) ->
-        let a' = unify a c in
-        let b' = unify b d in
-        Fn(a', b')
 
-    | (PolyType(a, t), PolyType(b, u)) ->
-        (* TODO: unimplemented! *)
-        unify t u
+let rec unify (t1: typ) (t2: typ) =
+    let rec unify' t1 t2 (tbl : typ ITbl.t) =
+        let t1 = find tbl t1 in
+        let t2 = find tbl t2 in
+        match (t1, t2) with
+        | (TUnit, TUnit) -> TUnit
 
-    | (a, b) -> raise TypeError
+        | (TVar(a), b) ->
+            begin match ITbl.find_opt tbl a with
+            | Some t -> unify' t b tbl
+            | None ->
+                ITbl.add tbl a b;
+                b
+            end
+        | (a, TVar(b)) ->
+            begin match ITbl.find_opt tbl b with
+            | Some t -> unify' a t tbl
+            | None ->
+                ITbl.add tbl b a;
+                a
+            end
+
+        | (Fn(a, b), Fn(c, d)) ->
+            let a' = unify' a c tbl in
+            let b' = unify' b d tbl in
+            Fn(a', b')
+
+        | (PolyType(a, t), PolyType(b, u)) ->
+            (* TODO: unimplemented! *)
+            unify' t u tbl
+
+        | (a, b) -> raise TypeError
+
+    in let emptyTbl = ITbl.create 1
+    in unify' t1 t2 emptyTbl
 
 
 (* copy the type introducing new variables for the quantification
