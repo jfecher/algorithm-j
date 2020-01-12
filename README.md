@@ -28,6 +28,8 @@ how to handle literals where you already know the type.
 Note: I was lazy with the lexer! Since integers are not in the language,
 typing one will throw an exception, beware!
 
+---
+
 ## Running
 
 Make sure `menhir` and `ocamllex` are installed either via `opam install menhir ocamllex`
@@ -37,5 +39,9 @@ Run `$ ./j` to start the REPL, type in any expression and get the type as a resu
 
 ```
 > \x.\y.x
-'1 -> '2 -> '1
+'a -> 'b -> 'a
+> \x.x x
+type error
+> let id = \x.x in id id
+'c -> 'c
 ```

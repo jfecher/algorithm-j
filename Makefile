@@ -14,4 +14,4 @@ lexer.cmo: Makefile parser.cmo lexer.mll
 	ocamlc lexer.mli
 
 clean:
-	@rm *.cmo *.cmi *.cmx lexer.ml lexer.mli parser.ml parser.mli j j.o
+	@rm *.cmo *.cmi lexer.ml lexer.mli parser.ml parser.mli j

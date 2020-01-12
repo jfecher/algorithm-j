@@ -46,10 +46,17 @@ type expr = Unit
           | Let of string * expr * expr
 *)
 
+(* Convert 1-26 to a-z, 27-52 to A-Z, and leave other numbers as is.
+ * Its very unlikely anyone will go higher than 52 typevars in this example anyway *)
+let letter_of_number n =
+    if n >= 1 && n <= 26       then String.make 1 (Char.chr (Char.code 'a' + n - 1))
+    else if n >= 27 && n <= 52 then String.make 1 (Char.chr (Char.code 'A' + n - 27))
+    else string_of_int n
+
 (* pretty printing types *)
 let rec string_of_type : typ -> string = function
     | TUnit -> "unit"
-    | TVar(n) -> "'" ^ string_of_int n
+    | TVar(n) -> "'" ^ letter_of_number n
     | Fn(a, b) ->
         begin match a with
         | Fn(_, _) | PolyType(_, _) ->
@@ -280,6 +287,7 @@ let rec main () =
         print_string "\n"
     with
        | TypeError -> print_endline "type error"
+       | Not_found -> print_endline "variable not found"
        | Failure(s) -> print_endline "lexing failure, invalid symbol");
     curTV := 0;
     main ()
