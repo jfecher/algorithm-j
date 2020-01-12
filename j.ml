@@ -6,7 +6,7 @@
  *  a few changed for ease of typing:
  *       Γ (gamma) => env
  *       ⊢ⱼ (perpendicular symbol with j subscript, a.k.a. algorithm J) => infer
- *       Γ¯ (gamma bar) => copy_with_new_typevars
+ *       Γ¯ (gamma bar) => create_polytype
  *
  *  And some expr constructors changed to match their more colloquial names
  *  to hopefully make this somewhat more approachable:
@@ -63,7 +63,7 @@ let rec string_of_type : typ -> string = function
                 List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv)
                                ("'" ^ string_of_int first)
                                rest
-        in "forall " ^ tvs_str ^ ". "
+        in "forall " ^ tvs_str ^ ". " ^ string_of_type t
 
 let print_type (t: typ) : unit =
     print_string (string_of_type t)
@@ -96,7 +96,7 @@ let inst (s: typ) : typ =
         | TUnit -> TUnit
         | TVar(n) ->
             begin match ITbl.find_opt tbl n with
-            | Some(n') -> TVar(n')
+            | Some(t') -> t'
             | None -> TVar(n)
             end
         | Fn(a, b) -> Fn(replace_tvs tbl a, replace_tvs tbl b)
@@ -110,8 +110,8 @@ let inst (s: typ) : typ =
      * this means it is now monomorphic and not forall-quantified *)
     | PolyType(typevars, typ) ->
         let tvs_to_replace = ITbl.create 1 in
-        List.iter (fun tv -> ITbl.add tvs_to_replace tv (newvar ())) typevars;
-        replace_tvs (ITbl.create 0) typ
+        List.iter (fun tv -> ITbl.add tvs_to_replace tv (newvar_t ())) typevars;
+        replace_tvs tvs_to_replace typ
     | other -> other
 
 
@@ -134,6 +134,14 @@ let rec find tbl = function
         List.iter (ITbl.remove tbl_cpy) tvs;
         PolyType(tvs, find tbl_cpy t)
 
+(* Can a monomorphic TVar(a) be found inside this type? *)
+let rec occurs a (* in *) = function
+    | TUnit -> false
+    | TVar(b) -> a = b
+    | Fn(b, c) -> occurs a b || occurs a c
+    | PolyType(tvs, t) ->
+        if List.exists (fun tv -> a = tv) tvs then false
+        else occurs a t
 
 let rec unify (t1: typ) (t2: typ) =
     let rec unify' t1 t2 (tbl : typ ITbl.t) =
@@ -146,6 +154,9 @@ let rec unify (t1: typ) (t2: typ) =
             begin match ITbl.find_opt tbl a with
             | Some t -> unify' t b tbl
             | None ->
+                (* Need this check to block recursive types, this catches, e.g., \x.x x *)
+                if occurs a b then raise TypeError
+                else
                 ITbl.add tbl a b;
                 b
             end
@@ -153,6 +164,8 @@ let rec unify (t1: typ) (t2: typ) =
             begin match ITbl.find_opt tbl b with
             | Some t -> unify' a t tbl
             | None ->
+                if occurs b a then raise TypeError
+                else
                 ITbl.add tbl b a;
                 a
             end
@@ -172,34 +185,21 @@ let rec unify (t1: typ) (t2: typ) =
     in unify' t1 t2 emptyTbl
 
 
-(* copy the type introducing new variables for the quantification
- * to avoid unwanted captures *)
-let copy_with_new_typevars (t: typ) : typ =
-    let rec copy_wnt' map = function
-        | TUnit -> TUnit
-        | TVar(n) ->
-            begin match ITbl.find_opt map n with
-            | Some(n') -> TVar(n')
-            | None ->
-                let n' = newvar () in
-                ITbl.add map n n';
-                TVar(n')
-            end
-        | Fn(a, b) -> Fn(copy_wnt' map a, copy_wnt' map b)
-        | PolyType(typevars, typ) ->
-            let typevars' = List.map (fun tv ->
-                let n' = newvar () in
-                ITbl.add map tv n';
-                n'
-            ) typevars in
-            let ret = PolyType(typevars', copy_wnt' map typ) in
-            List.iter (ITbl.remove map) typevars';
-            ret
+(* Find all typevars and wrap the type in a PolyType *)
+(* e.g.  create_polytype (a -> b -> b) = forall a b. a -> b -> b  *)
+let create_polytype (t: typ) : typ =
+    (* collect all the monomorphic typevars *)
+    let rec find_all_tvs = function
+        | TUnit -> []
+        | TVar(n) -> [n]
+        | Fn(a, b) -> find_all_tvs a @ find_all_tvs b
+        | PolyType(tvs, typ) ->
+            (* Remove all of tvs from find_all_tvs typ, this could be faster *)
+            List.filter (fun tv -> not (List.mem tv tvs)) (find_all_tvs typ)
 
-    (* In most programs, most types will have relatively few typevars,
-     * so the initial size of emptyTbl should be somewhere near 0 *)
-    in let emptyTbl = ITbl.create 1
-    in copy_wnt' emptyTbl t
+    in find_all_tvs t
+    |> List.sort_uniq compare
+    |> fun l -> PolyType(l, t)
 
 
 (* The main entry point to type inference *)
@@ -252,13 +252,13 @@ let rec infer env : expr -> typ = function
 
     (* Let
      *   infer env e0 = t
-     *   infer (SMap.add x (copy_with_new_typevars t) env) e1 = t'
+     *   infer (SMap.add x (create_polytype t) env) e1 = t'
      *   -----------------
      *   infer env (let x = e0 in e1) = t'
      *)
     | Let(x, e0, e1) ->
         let t = infer env e0 in
-        let t' = infer (SMap.add x (copy_with_new_typevars t) env) e1 in
+        let t' = infer (SMap.add x (create_polytype t) env) e1 in
         t'
 
 
