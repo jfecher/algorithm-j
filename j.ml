@@ -1,6 +1,6 @@
 (*
  *  This implementation follows the type inference rules given at
- *  https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system#Algorithm_J 
+ *  https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system#Algorithm_J
  *
  *  The algorithm itself uses most of the names from the above link, with
  *  a few changed for ease of typing:
@@ -48,7 +48,7 @@ let newvar () =
 
 let newvar_t () = TVar (newvar (), ref None)
 
-(* 
+(*
  * Working with a simple language with unit, variables,
  * type annotations, lambdas, and function application
  *)
@@ -61,12 +61,25 @@ type expr = Unit
           | Let of string * expr * expr
 *)
 
-(* Convert 1-26 to a-z, 27-52 to A-Z, and leave other numbers as is.
- * Its very unlikely anyone will go higher than 52 typevars in this example anyway *)
-let letter_of_number n =
-    if n >= 1 && n <= 26       then String.make 1 (Char.chr (Char.code 'a' + n - 1))
-    else if n >= 27 && n <= 52 then String.make 1 (Char.chr (Char.code 'A' + n - 27))
-    else string_of_int n
+(* Setup for our Hashtbl of int -> 't *)
+module HashableInt = struct
+    include Int
+    let hash = Hashtbl.hash
+end
+
+(* Provides 'a Itbl.t and member functions *)
+module ITbl = Hashtbl.Make(HashableInt)
+
+(* Return the next unique lowercase-letter string after the given one, e.g: *)
+(*   next_letter "'a" = "'b"
+ *   next_letter "'b" = "'c"
+ *   next_letter "'z" = "'{"   This can be fixed but most examples shouldn't have > 26 typevars anyway
+ *
+ *)
+let next_letter (s: bytes) =
+    let c = Bytes.get s 1 in
+    Bytes.set s 1 (Char.chr (Char.code c + 1))
+
 
 (* If this type is the a in a -> b, should it be parenthesized? *)
 (* Note this is recursive in case bound typevars are used *)
@@ -75,19 +88,36 @@ let rec should_parenthesize = function
     | Fn(_, _) | PolyType(_, _) -> true
     | _ -> false
 
+
 (* pretty printing types *)
-let rec string_of_type : typ -> string = function
+let string_of_type (t : typ) : string =
+    (* Keep track of number to character bindings for typevars
+     * e.g. '2 => 'a, '5 => 'b, etc.
+     * Letters are assigned to typevars by the order in which the typevars
+     * appear in the type, left to right *)
+    let rec string_of_type' cur_typevar_name typevar_name_tbl = function
     | TUnit -> "unit"
-    | TVar(_, { contents = Some t' }) -> string_of_type t'
-    | TVar(n, { contents = None }) -> "'" ^ letter_of_number n
+    | TVar(_, { contents = Some t' }) -> string_of_type' cur_typevar_name typevar_name_tbl t'
+    | TVar(n, { contents = None }) ->
+        begin match ITbl.find_opt typevar_name_tbl n with
+        | Some s -> s
+        | None ->
+            let s = Bytes.to_string cur_typevar_name in
+            ITbl.add typevar_name_tbl n s;
+            next_letter cur_typevar_name;
+            s
+        end
     | Fn(a, b) ->
-        if should_parenthesize a then
-            "(" ^ string_of_type a ^ ") -> " ^ string_of_type b
-        else
-            string_of_type a ^ " -> " ^ string_of_type b
+        let a_str = string_of_type' cur_typevar_name typevar_name_tbl a in
+        let b_str = string_of_type' cur_typevar_name typevar_name_tbl b in
+        if should_parenthesize a then "(" ^ a_str ^ ") -> " ^ b_str
+        else a_str ^ " -> " ^ b_str
     | PolyType(tvs, t) ->
-        let tvs_str = List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv) "" tvs
-        in "forall" ^ tvs_str ^ " . " ^ string_of_type t
+        let curried_fn t = string_of_type' cur_typevar_name typevar_name_tbl (TVar(t, ref None)) in
+        let tvs_str = List.fold_left (fun s tv -> s ^ " '" ^ curried_fn tv) "" tvs in
+        "forall" ^ tvs_str ^ " . " ^ string_of_type' cur_typevar_name typevar_name_tbl t
+
+    in string_of_type' (Bytes.of_string "'a") (ITbl.create 1) t
 
 let print_type (t: typ) : unit =
     print_string (string_of_type t)
@@ -98,13 +128,6 @@ let print_type (t: typ) : unit =
  * of variable types
  *)
 module SMap = Map.Make(String)
-
-module HashableInt = struct
-    include Int
-    let hash = Hashtbl.hash
-end
-
-module ITbl = Hashtbl.Make(HashableInt)
 
 type tenv = typ SMap.t
 
@@ -264,7 +287,7 @@ let rec infer env : expr -> typ = function
                              their computed types
 ******************************************************************************)
 
-    
+
 (* The classic read-eval-printline-loop *)
 let rec main () =
     (try
