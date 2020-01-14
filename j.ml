@@ -20,10 +20,25 @@
 
 type typevar = int
 
-type typ = TUnit
-         | TVar of typevar
-         | Fn of typ * typ
-         | PolyType of typevar list * typ
+type typ =
+    (* unit type *)
+    TUnit
+
+    (* 'a, 'b, etc. *)
+    (* Note that this includes an optional binding, set during unification;
+     * this is unique to algorithm J where mutation is needed to remember
+     * some substitutions *)
+    | TVar of typevar * typ option ref
+
+    (* 'a -> 'b, all functions are single-argument only *)
+    (* e.g. \a b c.c  is automatically translated to \a.\b.\c.c  *)
+    (* Currying is also automatic *)
+    | Fn of typ * typ
+
+    (* Polytypes in the form  forall 'a 'b ... 'y . 'z  *)
+    (* The typevar list will be a list of all monomorphic typevars in 'z *)
+    (* Used only in let-bindings to make the declaration polymorphic *)
+    | PolyType of typevar list * typ
 
 let curTV = ref 0
 
@@ -31,7 +46,7 @@ let newvar () =
     curTV := !curTV + 1;
     !curTV
 
-let newvar_t () = TVar (newvar ())
+let newvar_t () = TVar (newvar (), ref None)
 
 (* 
  * Working with a simple language with unit, variables,
@@ -53,24 +68,26 @@ let letter_of_number n =
     else if n >= 27 && n <= 52 then String.make 1 (Char.chr (Char.code 'A' + n - 27))
     else string_of_int n
 
+(* If this type is the a in a -> b, should it be parenthesized? *)
+(* Note this is recursive in case bound typevars are used *)
+let rec should_parenthesize = function
+    | TVar(_, { contents = Some t' }) -> should_parenthesize t'
+    | Fn(_, _) | PolyType(_, _) -> true
+    | _ -> false
+
 (* pretty printing types *)
 let rec string_of_type : typ -> string = function
     | TUnit -> "unit"
-    | TVar(n) -> "'" ^ letter_of_number n
+    | TVar(_, { contents = Some t' }) -> string_of_type t'
+    | TVar(n, { contents = None }) -> "'" ^ letter_of_number n
     | Fn(a, b) ->
-        begin match a with
-        | Fn(_, _) | PolyType(_, _) ->
-                "(" ^ string_of_type a ^ ") -> " ^ string_of_type b
-        | _ -> string_of_type a ^ " -> " ^ string_of_type b
-        end
+        if should_parenthesize a then
+            "(" ^ string_of_type a ^ ") -> " ^ string_of_type b
+        else
+            string_of_type a ^ " -> " ^ string_of_type b
     | PolyType(tvs, t) ->
-        let tvs_str = match tvs with
-            | [] -> ""
-            | first::rest ->
-                List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv)
-                               ("'" ^ string_of_int first)
-                               rest
-        in "forall " ^ tvs_str ^ ". " ^ string_of_type t
+        let tvs_str = List.fold_left (fun s tv -> s ^ " '" ^ string_of_int tv) "" tvs
+        in "forall" ^ tvs_str ^ " . " ^ string_of_type t
 
 let print_type (t: typ) : unit =
     print_string (string_of_type t)
@@ -101,10 +118,11 @@ let inst (s: typ) : typ =
      * associated value in the same table, leave them otherwise *)
     let rec replace_tvs tbl = function
         | TUnit -> TUnit
-        | TVar(n) ->
+        | TVar(_, { contents = Some t }) -> replace_tvs tbl t
+        | TVar(n, { contents = None }) ->
             begin match ITbl.find_opt tbl n with
             | Some(t') -> t'
-            | None -> TVar(n)
+            | None -> TVar(n, ref None)
             end
         | Fn(a, b) -> Fn(replace_tvs tbl a, replace_tvs tbl b)
         | PolyType(tvs, typ) ->
@@ -125,71 +143,45 @@ let inst (s: typ) : typ =
 (* The find for our union-find like algorithm *)
 (* Go through the given type, replacing all typevars with their bound types when possible *)
 
-(* This is the main part where this reference impl diverges
- * from the word-for-word algorithm but the union-find algorithm
- * also isn't the core of algorithm-j anyway and this works as well *)
-let rec find tbl = function
-    | TUnit -> TUnit
-    | TVar(a) ->
-        begin match ITbl.find_opt tbl a with
-        | Some t' -> find tbl t'
-        | None -> TVar(a)
-        end
-    | Fn(a, b) -> Fn(find tbl a, find tbl b)
-    | PolyType(tvs, t) ->
-        let tbl_cpy = ITbl.copy tbl in
-        List.iter (ITbl.remove tbl_cpy) tvs;
-        PolyType(tvs, find tbl_cpy t)
-
 (* Can a monomorphic TVar(a) be found inside this type? *)
 let rec occurs a (* in *) = function
     | TUnit -> false
-    | TVar(b) -> a = b
+    | TVar(_, { contents = Some t }) -> occurs a t
+    | TVar(b, { contents = None }) -> a = b
     | Fn(b, c) -> occurs a b || occurs a c
     | PolyType(tvs, t) ->
         if List.exists (fun tv -> a = tv) tvs then false
         else occurs a t
 
-let rec unify (t1: typ) (t2: typ) =
-    let rec unify' t1 t2 (tbl : typ ITbl.t) =
-        let t1 = find tbl t1 in
-        let t2 = find tbl t2 in
-        match (t1, t2) with
-        | (TUnit, TUnit) -> TUnit
+let rec unify (t1: typ) (t2: typ) : unit =
+    match (t1, t2) with
+    | (TUnit, TUnit) -> ()
 
-        | (TVar(a), b) ->
-            begin match ITbl.find_opt tbl a with
-            | Some t -> unify' t b tbl
-            | None ->
-                (* Need this check to block recursive types, this catches, e.g., \x.x x *)
-                if occurs a b then raise TypeError
-                else
-                ITbl.add tbl a b;
-                b
-            end
-        | (a, TVar(b)) ->
-            begin match ITbl.find_opt tbl b with
-            | Some t -> unify' a t tbl
-            | None ->
-                if occurs b a then raise TypeError
-                else
-                ITbl.add tbl b a;
-                a
-            end
+    | (TVar(a, boundTy), b) ->
+        begin match !boundTy with
+        | Some a' -> unify a' b
+        | None -> (* create binding *)
+            if occurs a b then raise TypeError else
+            boundTy := Some b
+        end
 
-        | (Fn(a, b), Fn(c, d)) ->
-            let a' = unify' a c tbl in
-            let b' = unify' b d tbl in
-            Fn(a', b')
+    | (a, TVar(b, boundTy)) ->
+        begin match !boundTy with
+        | Some b' -> unify a b'
+        | None -> (* create binding *)
+            if occurs b a then raise TypeError else
+            boundTy := Some a
+        end
 
-        | (PolyType(a, t), PolyType(b, u)) ->
-            (* TODO: unimplemented! *)
-            unify' t u tbl
+    | (Fn(a, b), Fn(c, d)) ->
+        unify a c;
+        unify b d
 
-        | (a, b) -> raise TypeError
+    | (PolyType(a, t), PolyType(b, u)) ->
+        (* NOTE: Unneeded rule, never used due to [Var] and inst *)
+        unify t u
 
-    in let emptyTbl = ITbl.create 1
-    in unify' t1 t2 emptyTbl
+    | (a, b) -> raise TypeError
 
 
 (* Find all typevars and wrap the type in a PolyType *)
@@ -198,7 +190,8 @@ let create_polytype (t: typ) : typ =
     (* collect all the monomorphic typevars *)
     let rec find_all_tvs = function
         | TUnit -> []
-        | TVar(n) -> [n]
+        | TVar(_, { contents = Some t }) -> find_all_tvs t
+        | TVar(n, { contents = None }) -> [n]
         | Fn(a, b) -> find_all_tvs a @ find_all_tvs b
         | PolyType(tvs, typ) ->
             (* Remove all of tvs from find_all_tvs typ, this could be faster *)
@@ -212,7 +205,7 @@ let create_polytype (t: typ) : typ =
 (* The main entry point to type inference *)
 (* All branches (except for the trivial Unit) of the first match in this function
    are translated directly from the rules for algorithm J, given in comments *)
-(* infer : Env -> Expr -> Type *)
+(* infer : typ SMap.t -> Expr -> Type *)
 let rec infer env : expr -> typ = function
     | Unit -> TUnit
 
@@ -239,12 +232,8 @@ let rec infer env : expr -> typ = function
         let t0 = infer env f in
         let t1 = infer env x in
         let t' = newvar_t () in
-        let t0' = unify t0 (Fn(t1, t')) in
-        (* t' *)
-        begin match t0' with
-        | Fn(_, unified_t') -> unified_t'
-        | _ -> raise TypeError (* unreachable *)
-        end
+        unify t0 (Fn(t1, t'));
+        t'
 
     (* Abs
      *   t = newvar ()
@@ -293,3 +282,13 @@ let rec main () =
     main ()
 
 let () = main ()
+
+
+(* Tests *)
+
+(* 1:    \f.\x. f x  :  (a -> b) -> a -> b  *)
+(* 2:    \f.\x. f (f x) : (a -> a) -> a -> a  *)
+(* (+):  \m.\n.\f.\x. m f (n f x)  :  (a -> b -> c) -> (a -> d -> b) -> a -> d -> c  *)
+(* succ: \n.\f.\x. f (n f x)  :  ((a -> b) -> c -> a) -> (a -> b) -> c -> b  *)
+(* mult: \m.\n.\f.\x. m (n f) x  :  (a -> b -> c) -> (d -> a) -> d -> b -> c  *)
+(* pred: \n.\f.\x. n (\g.\h. h (g f)) (\u.x) (\u.u)  :  (((a -> b) -> (b -> c) -> c) -> (d -> e) -> (f -> f) -> g) -> a -> e -> g  *)
