@@ -15,7 +15,7 @@
 let unitt = "()"
 let ident = ['a'-'z' 'A'-'Z' '_']+
 let whitespace = [' ' '\t']+
-let newline = 'r' | '\n' | "\r\n"
+let newline = '\r' | '\n' | "\r\n"
 
 rule read =
     parse
