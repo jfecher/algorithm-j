@@ -43,5 +43,9 @@ Run `$ ./j` to start the REPL, type in any expression and get the type as a resu
 > \x.x x
 type error
 > let id = \x.x in id id
-'c -> 'c
+'a -> 'a
+> let add = \m n f x. m f (n f x) in add
+('a -> 'b -> 'c) -> ('a -> 'd -> 'b) -> 'a -> 'd -> 'c
+> let pred = \n f x. n (\g h. h (g f)) (\u.x) (\u.u) in pred
+((('a -> 'b) -> ('b -> 'c) -> 'c) -> ('d -> 'e) -> ('f -> 'f) -> 'g) -> 'a -> 'e -> 'g
 ```
