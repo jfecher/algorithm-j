@@ -15,7 +15,7 @@
 parse_expr: e=term; Tok_EOF   { e }
 
 term: t=app_term                                              { t }
-    | Tok_Backslash; x=Tok_Ident; Tok_Dot; t=term             { Expr.Lambda(x, t) }
+    | Tok_Backslash; l=lambda                                 { l }
     | Tok_Let; x=Tok_Ident; Tok_Eq; e1=term; Tok_In; e2=term  { Expr.Let(x, e1, e2) }
     ;
 
@@ -27,3 +27,8 @@ atomic_term: Tok_LParen; t=term; Tok_RParen  { t }
            | s=Tok_Ident                     { Expr.Identifier(s) }
            | Tok_Unit                        { Expr.Unit }
            ;
+
+(* Support \a b c. shorthand *)
+lambda: x=Tok_Ident; Tok_Dot; t=term    { Expr.Lambda(x, t) }
+      | x=Tok_Ident; l=lambda           { Expr.Lambda(x, l) }
+      ;
