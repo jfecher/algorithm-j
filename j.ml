@@ -180,21 +180,22 @@ let rec unify (t1: typ) (t2: typ) : unit =
     match (t1, t2) with
     | (TUnit, TUnit) -> ()
 
+    (* These two recursive calls to the bound typevar replace
+     * the 'find' in the union-find algorithm *)
+    | (TVar(_, { contents = Some a' }), b) -> unify a' b
+    | (a, TVar(_, { contents = Some b' })) -> unify a b'
+
     | (TVar(a, boundTy), b) ->
-        begin match !boundTy with
-        | Some a' -> unify a' b
-        | None -> (* create binding *)
-            if occurs a b then raise TypeError else
-            boundTy := Some b
-        end
+        (* create binding for boundTy that is currently empty *)
+        if t1 = t2 then () else (* a = a, but dont create a recursive binding to itself *)
+        if occurs a b then raise TypeError else
+        boundTy := Some b
 
     | (a, TVar(b, boundTy)) ->
-        begin match !boundTy with
-        | Some b' -> unify a b'
-        | None -> (* create binding *)
-            if occurs b a then raise TypeError else
-            boundTy := Some a
-        end
+        (* create binding for boundTy that is currently empty *)
+        if t1 = t2 then () else
+        if occurs b a then raise TypeError else
+        boundTy := Some a
 
     | (Fn(a, b), Fn(c, d)) ->
         unify a c;
