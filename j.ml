@@ -6,7 +6,7 @@
  *  a few changed for ease of typing:
  *       Γ (gamma) => env
  *       ⊢ⱼ (perpendicular symbol with j subscript, a.k.a. algorithm J) => infer
- *       Γ¯ (gamma bar) => create_polytype
+ *       Γ¯ (gamma bar) => generalize
  *
  *  And some expr constructors changed to match their more colloquial names
  *  to hopefully make this somewhat more approachable:
@@ -16,19 +16,26 @@
  *
  *  Note that a let-binding (or Declaration here) can be of either
  *  a variable or a function
+ *
+ *  Additionally, implementation of "levels" for efficient generalization is
+ *  taken from http://okmij.org/ftp/ML/generalization.html
  *)
 
-type typevar = int
+type typevar_id = int
+type level = int
 
 type typ =
     (* unit type *)
     TUnit
 
     (* 'a, 'b, etc. *)
-    (* Note that this includes an optional binding, set during unification;
-     * this is unique to algorithm J where mutation is needed to remember
-     * some substitutions *)
-    | TVar of typevar * typ option ref
+    (* A reference to a bound or unbound typevar, set during unification.
+     * This is unique to algorithm J where mutation is needed to remember
+     * some substitutions.
+     * The level of this typevar identifies how many let-bindings deep it was
+     * declared in. This is used to prevent generalization of typevars that
+     * escape outside the current let-binding scope. *)
+    | TVar of typevar ref
 
     (* 'a -> 'b, all functions are single-argument only *)
     (* e.g. \a b c.c  is automatically translated to \a.\b.\c.c  *)
@@ -38,15 +45,22 @@ type typ =
     (* Polytypes in the form  forall 'a 'b ... 'y . 'z  *)
     (* The typevar list will be a list of all monomorphic typevars in 'z *)
     (* Used only in let-bindings to make the declaration polymorphic *)
-    | PolyType of typevar list * typ
+    | PolyType of typevar_id list * typ
 
-let curTV = ref 0
+and typevar = Bound of typ
+            | Unbound of typevar_id * level
+
+let current_level = ref 1
+let current_typevar = ref 0
+
+let enterLevel () = incr current_level
+let exitLevel () = decr current_level
 
 let newvar () =
-    curTV := !curTV + 1;
-    !curTV
+    current_typevar := !current_typevar + 1;
+    !current_typevar
 
-let newvar_t () = TVar (newvar (), ref None)
+let newvar_t () = TVar (ref (Unbound (newvar (), !current_level)))
 
 (*
  * Working with a simple language with unit, variables,
@@ -84,7 +98,7 @@ let next_letter (s: bytes) =
 (* If this type is the a in a -> b, should it be parenthesized? *)
 (* Note this is recursive in case bound typevars are used *)
 let rec should_parenthesize = function
-    | TVar(_, { contents = Some t' }) -> should_parenthesize t'
+    | TVar({ contents = Bound t' }) -> should_parenthesize t'
     | Fn(_, _) | PolyType(_, _) -> true
     | _ -> false
 
@@ -97,8 +111,8 @@ let string_of_type (t : typ) : string =
      * appear in the type, left to right *)
     let rec string_of_type' cur_typevar_name typevar_name_tbl = function
     | TUnit -> "unit"
-    | TVar(_, { contents = Some t' }) -> string_of_type' cur_typevar_name typevar_name_tbl t'
-    | TVar(n, { contents = None }) ->
+    | TVar({ contents = Bound t' }) -> string_of_type' cur_typevar_name typevar_name_tbl t'
+    | TVar({ contents = Unbound(n, _) }) ->
         begin match ITbl.find_opt typevar_name_tbl n with
         | Some s -> s
         | None ->
@@ -113,7 +127,7 @@ let string_of_type (t : typ) : string =
         if should_parenthesize a then "(" ^ a_str ^ ") -> " ^ b_str
         else a_str ^ " -> " ^ b_str
     | PolyType(tvs, t) ->
-        let curried_fn t = string_of_type' cur_typevar_name typevar_name_tbl (TVar(t, ref None)) in
+        let curried_fn t = string_of_type' cur_typevar_name typevar_name_tbl (TVar (ref (Unbound(t, !current_level)))) in
         let tvs_str = List.fold_left (fun s tv -> s ^ " '" ^ curried_fn tv) "" tvs in
         "forall" ^ tvs_str ^ " . " ^ string_of_type' cur_typevar_name typevar_name_tbl t
 
@@ -141,11 +155,11 @@ let inst (s: typ) : typ =
      * associated value in the same table, leave them otherwise *)
     let rec replace_tvs tbl = function
         | TUnit -> TUnit
-        | TVar(_, { contents = Some t }) -> replace_tvs tbl t
-        | TVar(n, { contents = None }) ->
+        | TVar({ contents = Bound t }) -> replace_tvs tbl t
+        | TVar({ contents = Unbound (n, level)}) as t ->
             begin match ITbl.find_opt tbl n with
-            | Some(t') -> t'
-            | None -> TVar(n, ref None)
+            | Some t' -> t'
+            | None -> t
             end
         | Fn(a, b) -> Fn(replace_tvs tbl a, replace_tvs tbl b)
         | PolyType(tvs, typ) ->
@@ -167,14 +181,18 @@ let inst (s: typ) : typ =
 (* Go through the given type, replacing all typevars with their bound types when possible *)
 
 (* Can a monomorphic TVar(a) be found inside this type? *)
-let rec occurs a (* in *) = function
+let rec occurs a_id a_level (* in *) = function
     | TUnit -> false
-    | TVar(_, { contents = Some t }) -> occurs a t
-    | TVar(b, { contents = None }) -> a = b
-    | Fn(b, c) -> occurs a b || occurs a c
+    | TVar({ contents = Bound t }) -> occurs a_id a_level t
+    | TVar({ contents = Unbound(b_id, b_level)} as b_typevar) ->
+        let min_level = min a_level b_level in
+        b_typevar := Unbound (b_id, min_level);
+        a_id = b_id
+
+    | Fn(b, c) -> occurs a_id a_level b || occurs a_id a_level c
     | PolyType(tvs, t) ->
-        if List.exists (fun tv -> a = tv) tvs then false
-        else occurs a t
+        if List.exists (fun tv -> a_id = tv) tvs then false
+        else occurs a_id a_level t
 
 let rec unify (t1: typ) (t2: typ) : unit =
     match (t1, t2) with
@@ -182,20 +200,20 @@ let rec unify (t1: typ) (t2: typ) : unit =
 
     (* These two recursive calls to the bound typevar replace
      * the 'find' in the union-find algorithm *)
-    | (TVar(_, { contents = Some a' }), b) -> unify a' b
-    | (a, TVar(_, { contents = Some b' })) -> unify a b'
+    | (TVar({ contents = Bound a' }), b) -> unify a' b
+    | (a, TVar({ contents = Bound b' })) -> unify a b'
 
-    | (TVar(a, boundTy), b) ->
+    | (TVar({ contents = Unbound(a_id, a_level) } as a), b) ->
         (* create binding for boundTy that is currently empty *)
         if t1 = t2 then () else (* a = a, but dont create a recursive binding to itself *)
-        if occurs a b then raise TypeError else
-        boundTy := Some b
+        if occurs a_id a_level b then raise TypeError else
+        a := Bound b
 
-    | (a, TVar(b, boundTy)) ->
+    | (a, TVar({ contents = Unbound(b_id, b_level)} as b)) ->
         (* create binding for boundTy that is currently empty *)
         if t1 = t2 then () else
-        if occurs b a then raise TypeError else
-        boundTy := Some a
+        if occurs b_id b_level a then raise TypeError else
+        b := Bound a
 
     | (Fn(a, b), Fn(c, d)) ->
         unify a c;
@@ -209,13 +227,15 @@ let rec unify (t1: typ) (t2: typ) : unit =
 
 
 (* Find all typevars and wrap the type in a PolyType *)
-(* e.g.  create_polytype (a -> b -> b) = forall a b. a -> b -> b  *)
-let create_polytype (t: typ) : typ =
+(* e.g.  generalize (a -> b -> b) = forall a b. a -> b -> b  *)
+let generalize (t: typ) : typ =
     (* collect all the monomorphic typevars *)
     let rec find_all_tvs = function
         | TUnit -> []
-        | TVar(_, { contents = Some t }) -> find_all_tvs t
-        | TVar(n, { contents = None }) -> [n]
+        | TVar({ contents = Bound t }) -> find_all_tvs t
+        | TVar({ contents = Unbound (n, level)}) ->
+            if level > !current_level then [n]
+            else []
         | Fn(a, b) -> find_all_tvs a @ find_all_tvs b
         | PolyType(tvs, typ) ->
             (* Remove all of tvs from find_all_tvs typ, this could be faster *)
@@ -272,13 +292,20 @@ let rec infer env : expr -> typ = function
 
     (* Let
      *   infer env e0 = t
-     *   infer (SMap.add x (create_polytype t) env) e1 = t'
+     *   infer (SMap.add x (generalize t) env) e1 = t'
      *   -----------------
      *   infer env (let x = e0 in e1) = t'
+     *
+     * enter/exitLevel optimizations are from 
+     * http://okmij.org/ftp/ML/generalization.html
+     * In this implementation, they're required so we
+     * don't generalize types that escape into the environment.
      *)
     | Let(x, e0, e1) ->
+        enterLevel ();
         let t = infer env e0 in
-        let t' = infer (SMap.add x (create_polytype t) env) e1 in
+        exitLevel ();
+        let t' = infer (SMap.add x (generalize t) env) e1 in
         t'
 
 
@@ -302,17 +329,26 @@ let rec main () =
        | TypeError -> print_endline "type error"
        | Not_found -> print_endline "variable not found"
        | Failure(s) -> print_endline "lexing failure, invalid symbol");
-    curTV := 0;
+    current_typevar := 0;
     main ()
 
 let () = main ()
 
 
-(* Tests *)
+(* Tests
 
-(* 1:    \f.\x. f x  :  (a -> b) -> a -> b  *)
-(* 2:    \f.\x. f (f x) : (a -> a) -> a -> a  *)
-(* (+):  \m.\n.\f.\x. m f (n f x)  :  (a -> b -> c) -> (a -> d -> b) -> a -> d -> c  *)
-(* succ: \n.\f.\x. f (n f x)  :  ((a -> b) -> c -> a) -> (a -> b) -> c -> b  *)
-(* mult: \m.\n.\f.\x. m (n f) x  :  (a -> b -> c) -> (d -> a) -> d -> b -> c  *)
-(* pred: \n.\f.\x. n (\g.\h. h (g f)) (\u.x) (\u.u)  :  (((a -> b) -> (b -> c) -> c) -> (d -> e) -> (f -> f) -> g) -> a -> e -> g  *)
+1:    \f.\x. f x  :  (a -> b) -> a -> b
+2:    \f.\x. f (f x) : (a -> a) -> a -> a
+(+):  \m.\n.\f.\x. m f (n f x)  :  (a -> b -> c) -> (a -> d -> b) -> a -> d -> c
+succ: \n.\f.\x. f (n f x)  :  ((a -> b) -> c -> a) -> (a -> b) -> c -> b
+mult: \m.\n.\f.\x. m (n f) x  :  (a -> b -> c) -> (d -> a) -> d -> b -> c
+pred: \n.\f.\x. n (\g.\h. h (g f)) (\u.x) (\u.u)  :  (((a -> b) -> (b -> c) -> c) -> (d -> e) -> (f -> f) -> g) -> a -> e -> g
+
+*)
+
+(* Let generalization tests
+
+\x. let y = x in y      : 'a -> 'a
+\x. let y = \z.x in y   : 'a -> 'b -> 'a
+
+*)
