@@ -42,19 +42,20 @@ type typ =
     (* Currying is also automatic *)
     | Fn of typ * typ
 
-    (* Polytypes in the form  forall 'a 'b ... 'y . 'z  *)
-    (* The typevar list will be a list of all monomorphic typevars in 'z *)
-    (* Used only in let-bindings to make the declaration polymorphic *)
-    | PolyType of typevar_id list * typ
-
 and typevar = Bound of typ
             | Unbound of typevar_id * level
+
+(* Polytypes in the form  forall 'a 'b ... 'y . 'z  *)
+(* The typevar list will be a list of all monomorphic typevars in 'z *)
+(* Used only in let-bindings to make the declaration polymorphic *)
+type polytype = PolyType of typevar_id list * typ
+
 
 let current_level = ref 1
 let current_typevar = ref 0
 
-let enterLevel () = incr current_level
-let exitLevel () = decr current_level
+let enter_level () = incr current_level
+let exit_level () = decr current_level
 
 let newvar () =
     current_typevar := !current_typevar + 1;
@@ -75,6 +76,14 @@ type expr = Unit
           | Let of string * expr * expr
 *)
 
+exception TypeError
+
+(*
+ * The type environment contains our current assumptions
+ * of variable types
+ *)
+module SMap = Map.Make(String)
+
 (* Setup for our Hashtbl of int -> 't *)
 module HashableInt = struct
     include Int
@@ -84,73 +93,10 @@ end
 (* Provides 'a Itbl.t and member functions *)
 module ITbl = Hashtbl.Make(HashableInt)
 
-(* Return the next unique lowercase-letter string after the given one, e.g: *)
-(*   next_letter "'a" = "'b"
- *   next_letter "'b" = "'c"
- *   next_letter "'z" = "'{"   This can be fixed but most examples shouldn't have > 26 typevars anyway
- *
- *)
-let next_letter (s: bytes) =
-    let c = Bytes.get s 1 in
-    Bytes.set s 1 (Char.chr (Char.code c + 1))
-
-
-(* If this type is the a in a -> b, should it be parenthesized? *)
-(* Note this is recursive in case bound typevars are used *)
-let rec should_parenthesize = function
-    | TVar({ contents = Bound t' }) -> should_parenthesize t'
-    | Fn(_, _) | PolyType(_, _) -> true
-    | _ -> false
-
-
-(* pretty printing types *)
-let string_of_type (t : typ) : string =
-    (* Keep track of number to character bindings for typevars
-     * e.g. '2 => 'a, '5 => 'b, etc.
-     * Letters are assigned to typevars by the order in which the typevars
-     * appear in the type, left to right *)
-    let rec string_of_type' cur_typevar_name typevar_name_tbl = function
-    | TUnit -> "unit"
-    | TVar({ contents = Bound t' }) -> string_of_type' cur_typevar_name typevar_name_tbl t'
-    | TVar({ contents = Unbound(n, _) }) ->
-        begin match ITbl.find_opt typevar_name_tbl n with
-        | Some s -> s
-        | None ->
-            let s = Bytes.to_string cur_typevar_name in
-            ITbl.add typevar_name_tbl n s;
-            next_letter cur_typevar_name;
-            s
-        end
-    | Fn(a, b) ->
-        let a_str = string_of_type' cur_typevar_name typevar_name_tbl a in
-        let b_str = string_of_type' cur_typevar_name typevar_name_tbl b in
-        if should_parenthesize a then "(" ^ a_str ^ ") -> " ^ b_str
-        else a_str ^ " -> " ^ b_str
-    | PolyType(tvs, t) ->
-        let curried_fn t = string_of_type' cur_typevar_name typevar_name_tbl (TVar (ref (Unbound(t, !current_level)))) in
-        let tvs_str = List.fold_left (fun s tv -> s ^ " '" ^ curried_fn tv) "" tvs in
-        "forall" ^ tvs_str ^ " . " ^ string_of_type' cur_typevar_name typevar_name_tbl t
-
-    in string_of_type' (Bytes.of_string "'a") (ITbl.create 1) t
-
-let print_type (t: typ) : unit =
-    print_string (string_of_type t)
-
-
-(*
- * The type environment contains our current assumptions
- * of variable types
- *)
-module SMap = Map.Make(String)
-
-type tenv = typ SMap.t
-
-exception TypeError
-
 (* specializes the polytype s by copying the term and replacing the
  * bound type variables consistently by new monotype variables
  * E.g.   inst (forall a b. a -> b -> a) = c -> d -> c     *)
-let inst (s: typ) : typ =
+let inst (PolyType(typevars, typ)) : typ =
     (* Replace any typevars found in the Hashtbl with the
      * associated value in the same table, leave them otherwise *)
     let rec replace_tvs tbl = function
@@ -162,23 +108,13 @@ let inst (s: typ) : typ =
             | None -> t
             end
         | Fn(a, b) -> Fn(replace_tvs tbl a, replace_tvs tbl b)
-        | PolyType(tvs, typ) ->
-            let tbl_cpy = ITbl.copy tbl in
-            List.iter (ITbl.remove tbl_cpy) tvs;
-            PolyType(tvs, replace_tvs tbl_cpy typ)
-
-    in match s with
+    in
     (* Note that the returned type is no longer a PolyType,
-     * this means it is now monomorphic and not forall-quantified *)
-    | PolyType(typevars, typ) ->
-        let tvs_to_replace = ITbl.create 1 in
-        List.iter (fun tv -> ITbl.add tvs_to_replace tv (newvar_t ())) typevars;
-        replace_tvs tvs_to_replace typ
-    | other -> other
+     * this means it is now monomorphic, the 'forall' is gone. *)
+    let tvs_to_replace = ITbl.create 1 in
+    List.iter (fun tv -> ITbl.add tvs_to_replace tv (newvar_t ())) typevars;
+    replace_tvs tvs_to_replace typ
 
-
-(* The find for our union-find like algorithm *)
-(* Go through the given type, replacing all typevars with their bound types when possible *)
 
 (* Can a monomorphic TVar(a) be found inside this type? *)
 let rec occurs a_id a_level (* in *) = function
@@ -190,9 +126,7 @@ let rec occurs a_id a_level (* in *) = function
         a_id = b_id
 
     | Fn(b, c) -> occurs a_id a_level b || occurs a_id a_level c
-    | PolyType(tvs, t) ->
-        if List.exists (fun tv -> a_id = tv) tvs then false
-        else occurs a_id a_level t
+
 
 let rec unify (t1: typ) (t2: typ) : unit =
     match (t1, t2) with
@@ -219,16 +153,12 @@ let rec unify (t1: typ) (t2: typ) : unit =
         unify a c;
         unify b d
 
-    | (PolyType(a, t), PolyType(b, u)) ->
-        (* NOTE: Unneeded rule, never used due to [Var] and inst *)
-        unify t u
-
     | (a, b) -> raise TypeError
 
 
 (* Find all typevars and wrap the type in a PolyType *)
 (* e.g.  generalize (a -> b -> b) = forall a b. a -> b -> b  *)
-let generalize (t: typ) : typ =
+let generalize (t: typ) : polytype =
     (* collect all the monomorphic typevars *)
     let rec find_all_tvs = function
         | TUnit -> []
@@ -237,19 +167,24 @@ let generalize (t: typ) : typ =
             if level > !current_level then [n]
             else []
         | Fn(a, b) -> find_all_tvs a @ find_all_tvs b
-        | PolyType(tvs, typ) ->
-            (* Remove all of tvs from find_all_tvs typ, this could be faster *)
-            List.filter (fun tv -> not (List.mem tv tvs)) (find_all_tvs typ)
 
     in find_all_tvs t
     |> List.sort_uniq compare
-    |> fun l -> PolyType(l, t)
+    |> fun typevars -> PolyType(typevars, t)
+
+
+(* For the Abs/Lambda rule, parameter types need to be stored in *)
+(* our polytype map, though parameters shouldn't be generalized  *)
+(* since their types shouldn't change (be instantiated) within the function. *)
+(* This helper function performs the conversion while making that explicit. *)
+let dont_generalize (t: typ) : polytype =
+    PolyType([], t)
 
 
 (* The main entry point to type inference *)
 (* All branches (except for the trivial Unit) of the first match in this function
    are translated directly from the rules for algorithm J, given in comments *)
-(* infer : typ SMap.t -> Expr -> Type *)
+(* infer : polytype SMap.t -> Expr -> Type *)
 let rec infer env : expr -> typ = function
     | Unit -> TUnit
 
@@ -287,7 +222,9 @@ let rec infer env : expr -> typ = function
      *)
     | Lambda(x, e) ->
         let t = newvar_t () in
-        let t' = infer (SMap.add x t env) e in
+        (* t must be a polytype to go in our map, so make an empty forall *)
+        let env' = SMap.add x (dont_generalize t) env in
+        let t' = infer env' e in
         Fn(t, t')
 
     (* Let
@@ -296,15 +233,15 @@ let rec infer env : expr -> typ = function
      *   -----------------
      *   infer env (let x = e0 in e1) = t'
      *
-     * enter/exitLevel optimizations are from 
+     * enter/exit_level optimizations are from 
      * http://okmij.org/ftp/ML/generalization.html
      * In this implementation, they're required so we
      * don't generalize types that escape into the environment.
      *)
     | Let(x, e0, e1) ->
-        enterLevel ();
+        enter_level ();
         let t = infer env e0 in
-        exitLevel ();
+        exit_level ();
         let t' = infer (SMap.add x (generalize t) env) e1 in
         t'
 
@@ -314,6 +251,55 @@ let rec infer env : expr -> typ = function
                         the command line and showing
                              their computed types
 ******************************************************************************)
+
+(* Return the next unique lowercase-letter string after the given one, e.g: *)
+(*   next_letter "'a" = "'b"
+ *   next_letter "'b" = "'c"
+ *   next_letter "'z" = "'{"   This can be fixed but most examples shouldn't have > 26 typevars anyway
+ *
+ *)
+let next_letter (s: bytes) =
+    let c = Bytes.get s 1 in
+    Bytes.set s 1 (Char.chr (Char.code c + 1))
+
+
+(* If this type is the a in a -> b, should it be parenthesized? *)
+(* Note this is recursive in case bound typevars are used *)
+let rec should_parenthesize = function
+    | TVar({ contents = Bound t' }) -> should_parenthesize t'
+    | Fn(_, _) -> true
+    | _ -> false
+
+
+(* pretty printing types *)
+let string_of_type (t : typ) : string =
+    (* Keep track of number to character bindings for typevars
+     * e.g. '2 => 'a, '5 => 'b, etc.
+     * Letters are assigned to typevars by the order in which the typevars
+     * appear in the type, left to right *)
+    let rec string_of_type' cur_typevar_name typevar_name_tbl = function
+    | TUnit -> "unit"
+    | TVar({ contents = Bound t' }) -> string_of_type' cur_typevar_name typevar_name_tbl t'
+    | TVar({ contents = Unbound(n, _) }) ->
+        begin match ITbl.find_opt typevar_name_tbl n with
+        | Some s -> s
+        | None ->
+            let s = Bytes.to_string cur_typevar_name in
+            ITbl.add typevar_name_tbl n s;
+            next_letter cur_typevar_name;
+            s
+        end
+    | Fn(a, b) ->
+        let a_str = string_of_type' cur_typevar_name typevar_name_tbl a in
+        let b_str = string_of_type' cur_typevar_name typevar_name_tbl b in
+        if should_parenthesize a then "(" ^ a_str ^ ") -> " ^ b_str
+        else a_str ^ " -> " ^ b_str
+
+    in string_of_type' (Bytes.of_string "'a") (ITbl.create 1) t
+
+let print_type (t: typ) : unit =
+    print_string (string_of_type t)
+
 
 
 (* The classic read-eval-printline-loop *)
